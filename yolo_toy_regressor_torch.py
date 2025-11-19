@@ -21,8 +21,10 @@ import torch.nn.functional as F
 
 from datasets import load_dataset
 from skimage.measure import label, regionprops
-
 from utils.logger_quality import log_quality
+
+from models import YoloRegressorModel, load_model
+
 
 # =======================
 # Global Configuration
@@ -87,6 +89,7 @@ CONFIG = {
 
     # Checkpoint
     "BEST_MODEL_PATH": "best_val_iou.pt",
+    "BEST_CHECKPOINT_PATH": "best_checkpoint.pt",
 }
 
 # convenience flags
@@ -201,72 +204,6 @@ def get_samples_from_dataset(dataset):
     X = np.stack(X)  # (N, image_size, image_size, 3)
     Y = np.stack(Y)  # (N, 4)
     return X, Y
-
-# ---------- Model ----------
-def Conv2D(in_ch, out_ch, k, s=1):
-    pad = k // 2
-    return nn.Sequential(
-        nn.Conv2d(in_ch, out_ch, k, stride=s, padding=pad),
-        nn.LeakyReLU(0.1, inplace=True),
-    )
-
-class YoloRegressorModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        pool = lambda: nn.MaxPool2d(kernel_size=2, stride=2)
-
-        self.feat = nn.Sequential(
-            # Layer 1
-            Conv2D(3, 192, 7, s=2),
-            pool(),
-            # Layer 2
-            Conv2D(192, 256, 3),
-            pool(),
-            # Layer 3
-            Conv2D(256, 128, 1),
-            Conv2D(128, 256, 3),
-            Conv2D(256, 256, 1),
-            Conv2D(256, 512, 3),
-            pool(),
-            # Layer 4
-            Conv2D(512, 256, 1),
-            Conv2D(256, 512, 3),
-            Conv2D(512, 256, 1),
-            Conv2D(256, 512, 3),
-            Conv2D(512, 256, 1),
-            Conv2D(256, 512, 3),
-            Conv2D(512, 256, 1),
-            Conv2D(256, 512, 3),
-            Conv2D(512, 512, 1),
-            Conv2D(512, 1024, 3),
-            pool(),
-            # Layer 5
-            Conv2D(1024, 512, 1),
-            Conv2D(512, 1024, 3),
-            Conv2D(1024, 512, 1),
-            Conv2D(512, 1024, 3),
-            Conv2D(1024, 1024, 3),
-            # stride-2 conv
-            Conv2D(1024, 1024, 3, s=2),
-            # Layer 6
-            Conv2D(1024, 1024, 3),
-            Conv2D(1024, 1024, 3),
-        )
-        with torch.no_grad():
-            dummy = torch.zeros(1, 3, 448, 448)
-            flat = self.feat(dummy).numel()
-        self.fc = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(flat, 4096),
-            nn.LeakyReLU(0.1, inplace=True),
-            nn.Dropout(0.2),
-            nn.Linear(4096, 4)  # [xc,yc,w,h]
-        )
-
-    def forward(self, x):
-        x = self.feat(x)
-        x = self.fc(x)
-        return x
 
 # ---------- Training / Eval ----------
 def yolo_v1_lr_schedule(epoch, total_epochs=CONFIG["TOTAL_EPOCHS"], warmup=CONFIG["WARMUP"]):
@@ -420,6 +357,12 @@ def main():
             best_val_iou = val_iou
             torch.save(model.state_dict(), best_path)
             print(f"  ↳ Saved new best (val_iou={val_iou:.4f}) to {best_path}")
+            torch.save({
+                'epoch': epoch_num,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': opt.state_dict(),
+                'loss': train_loss,
+                }, CONFIG["BEST_CHECKPOINT_PATH"])
             log_quality(epoch_num, lr, train_loss, val_loss, val_iou, best=True)
 
         if stop:
